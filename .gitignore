@@ -1,0 +1,24 @@
+# Ignorar entorno virtual
+venv/
+env/
+.venv/
+
+# Ignorar archivos temporales de Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ignorar archivos de VSCode
+.vscode/
+
+# Ignorar caches de pip
+pip-wheel-metadata/
+*.egg-info/
+
+# Ignorar logs
+*.log
+
+# Ignorar archivos generados por el sistema
+.DS_Store
+Thumbs.db

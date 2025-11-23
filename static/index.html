@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <title>Rutas de Ambulancias Lima-Callao</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="/static/script.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <header class="sidebar-header">
+        <h1>Sistema de Rutas de Ambulancias</h1>
+        <p>
+          Simulador de rutas de emergencia en Lima-Callao.<br />
+          Selecciona la gravedad, el algoritmo y haz clic en el mapa para indicar la ubicación.
+        </p>
+      </header>
+
+      <section class="sidebar-section">
+        <label class="field-label" for="severity">Gravedad del caso</label>
+        <select id="severity" class="field-input">
+          <option value="leve">Leve</option>
+          <option value="moderada">Moderada</option>
+          <option value="grave">Grave</option>
+          <option value="todos">Todos (leve, moderada y grave)</option>
+        </select>
+      </section>
+
+      <section class="sidebar-section">
+        <label class="field-label" for="algorithm">Algoritmo de ruta</label>
+        <select id="algorithm" class="field-input">
+          <option value="dijkstra">Dijkstra (Ruta más corta)</option>
+          <option value="bellman_ford">Bellman–Ford (Penalizaciones)</option>
+          <option value="union_find">Union–Find (Bloqueos)</option>
+        </select>
+      </section>
+
+      <section class="sidebar-section">
+        <button id="findRouteBtn" class="primary-btn">Calcular ruta</button>
+        <p class="hint-text">Haz clic en el mapa para seleccionar la ubicación del incidente.</p>
+      </section>
+
+      <section class="sidebar-section info-panel">
+        <h2>Detalle de la simulación</h2>
+        <div id="info" class="info-body">
+          Selecciona un punto en el mapa y luego presiona <b>Calcular ruta</b>.
+        </div>
+      </section>
+
+      <section class="sidebar-section legend">
+        <h3>Leyenda</h3>
+        <ul class="legend-list">
+          <li><span class="legend-color legend-dijkstra"></span> Dijkstra</li>
+          <li><span class="legend-color legend-bellman"></span> Bellman–Ford</li>
+          <li><span class="legend-color legend-union"></span> Union–Find</li>
+          <li><span class="legend-color legend-leve"></span> Ruta caso leve</li>
+          <li><span class="legend-color legend-moderada"></span> Ruta caso moderado</li>
+          <li><span class="legend-color legend-grave"></span> Ruta caso grave</li>
+          <li><span class="legend-color legend-blocked"></span> Tramo bloqueado (simulado)</li>
+        </ul>
+      </section>
+    </aside>
+
+    <main class="map-wrapper">
+      <div id="map"></div>
+    </main>
+  </div>
+</body>
+</html>
