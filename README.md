@@ -1,4 +1,4 @@
-# 🚑 P.A.F.I – Sistema de Rutas de Ambulancias
+# 🚑 P.A.F.I – Plataforma de Asistencia Frente a Incidencias
 
 Aplicación desarrollada con **FastAPI**, **Leaflet** y **OSMnx** para calcular rutas óptimas hacia centros de salud según la gravedad del accidente y utilizando distintos algoritmos de rutas.
 
