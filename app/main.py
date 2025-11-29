@@ -4,8 +4,11 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Tuple, Optional, List, Dict, Any
 from geopy.distance import geodesic
-import osmnx as ox
 import networkx as nx
+import numpy as np
+import pandas as pd
+
+from app.utils.graph_loader import load_graph
 
 # -----------------------------
 # MODELO DE ENTRADA
@@ -29,140 +32,205 @@ async def index():
 
 
 # -----------------------------
-# CARGA DEL GRAFO (OSMnx)
+# CARGA DEL GRAFO (LIMA + CALLAO)
 # -----------------------------
-print("Cargando grafo de San Miguel, Lima...")
-def load_osmnx_graph(place_name: str = "San Miguel, Lima, Peru"):
-    G = ox.graph_from_place(place_name, network_type="drive")
-    return G
+print("Cargando grafo de Lima y Callao desde CSV...")
 
-graph = load_osmnx_graph("San Miguel, Lima, Peru")
-print(f"Grafo cargado: {len(graph.nodes)} nodos, {len(graph.edges)} aristas.")
+# G: grafo vial dirigido (Lima + Callao)
+# hospitals_df: catálogo de centros de salud (con columnas X, Y, NOMBRE, Tipo, etc.)
+graph, hospitals_df = load_graph(base_path="app/data")
+
+graph_bellman = graph.copy()
+for u, v, data in graph_bellman.edges(data=True):
+    L = float(data.get("weight", 0.0))
+    tipo_via = str(data.get("tipo_via", "")).lower()
+    
+    # Penaliza calles internas / residenciales
+    if tipo_via in ["residential", "service", "living_street"]:
+        data["weight"] = L * 2.5
+    # Favorece vías principales
+    elif tipo_via in ["primary", "secondary", "trunk", "motorway"]:
+        data["weight"] = L * 0.8
+
+# Cargamos también el listado de nodos viales para búsquedas rápidas de vecinos
+nodes_df = pd.read_csv("app/data/nodos_lima_callao.csv", dtype={"node_id": str})
+NODE_IDS = nodes_df["node_id"].values
+NODE_LATS = nodes_df["lat"].values
+NODE_LONS = nodes_df["lon"].values
+
+print(f"Grafo listo: {len(graph.nodes)} nodos, {len(graph.edges)} aristas.")
+
+# Preprocesamos los tipos de centros de salud para cada severidad
+ALL_TYPES = sorted(set(hospitals_df["Tipo"].astype(str)))
+
+
+def build_severity_types() -> Dict[str, List[str]]:
+    grave = []
+    moderada_extra = []
+    for t in ALL_TYPES:
+        tu = t.upper().replace("Í", "I")  # CLÍNICA -> CLINICA
+        if "HOSPITAL" in tu:
+            grave.append(t)
+        if "CLINIC" in tu or "EMERGENCIA" in tu or "URGENCIA" in tu or "POLICLIN" in tu:
+            moderada_extra.append(t)
+
+    grave = sorted(set(grave))
+    moderada = sorted(set(grave + moderada_extra))
+    leve = sorted(set(ALL_TYPES))  
+
+    return {
+        "grave": grave,
+        "moderada": moderada,
+        "leve": leve,
+        "todos": leve,
+    }
+
+SEVERITY_TYPES = build_severity_types()
+
+
+def severity_to_types(severity: str) -> List[str]:
+    s = (severity or "").lower()
+    return SEVERITY_TYPES.get(s, SEVERITY_TYPES["leve"])
 
 
 # -----------------------------
 # HELPERS
 # -----------------------------
-def tags_by_severity(severity: str) -> Dict[str, List[str]]:
-    s = (severity or "").lower()
-    if s == "grave":
-        return {"amenity": ["hospital"]}
-    elif s == "moderada":
-        return {"amenity": ["hospital", "clinic"]}
-    elif s == "leve":
-        return {"amenity": ["clinic", "doctors", "pharmacy", "health_center"]}
-    elif s == "todos":
-        # Usado solo si alguna vez se llama directo con "todos"
-        return {"amenity": ["hospital", "clinic", "doctors", "pharmacy", "health_center"]}
-    else:
-        # Por defecto, usar todo
-        return {"amenity": ["hospital", "clinic", "doctors", "pharmacy", "health_center"]}
+def nearest_graph_node(lat: float, lon: float) -> str:
+    """
+    Devuelve el id del nodo vial más cercano (en todo Lima + Callao),
+    usando una búsqueda vectorizada en NumPy (rápida incluso con ~200k nodos).
+    """
+    dlat = NODE_LATS - lat
+    dlon = NODE_LONS - lon
+    # Distancia aproximada en grados (suficiente para escoger el más cercano)
+    d2 = dlat * dlat + dlon * dlon
+    idx = int(np.argmin(d2))
+    return str(NODE_IDS[idx])
 
 
 def find_nearest_place(
     lat: float,
     lon: float,
     severity: str,
-    place_name: str = "San Miguel, Lima, Peru"
 ) -> Optional[Tuple[float, float, str, str]]:
     """
-    Busca el establecimiento más cercano según la gravedad.
-    Retorna (lat, lon, nombre, tipo_amenity) o None si no encuentra.
+    Busca el establecimiento de salud más cercano en TODO Lima + Callao,
+    según la gravedad.
+    Retorna (lat, lon, nombre, tipo) o None si no encuentra.
     """
-    tags = tags_by_severity(severity)
-    try:
-        pois = ox.features_from_place(place_name, tags=tags)
-    except Exception:
+    allowed_types = severity_to_types(severity)
+    df = hospitals_df[hospitals_df["Tipo"].isin(allowed_types)]
+
+    if df.empty:
         return None
 
-    if pois is None or len(pois) == 0:
-        return None
-
-    min_place = None
+    min_row = None
     min_dist = float("inf")
-    for _, row in pois.iterrows():
+
+    for _, row in df.iterrows():
+        plat = row["Y"]
+        plon = row["X"]
         try:
-            geom = row.geometry
-            c = geom.centroid
-            plat, plon = c.y, c.x
             d = geodesic((lat, lon), (plat, plon)).km
-            if d < min_dist:
-                min_dist = d
-                min_place = (
-                    plat,
-                    plon,
-                    row.get("name", "Centro sin nombre"),
-                    row.get("amenity", "desconocido"),
-                )
         except Exception:
-            continue
+            # Si geodesic falla por algún motivo, usamos distancia euclidiana
+            d = ((lat - plat) ** 2 + (lon - plon) ** 2) ** 0.5
 
-    return min_place
+        if d < min_dist:
+            min_dist = d
+            min_row = row
+
+    if min_row is None:
+        return None
+
+    return (
+        float(min_row["Y"]),
+        float(min_row["X"]),
+        str(min_row.get("NOMBRE", "Centro sin nombre")),
+        str(min_row.get("Tipo", "desconocido")),
+    )
 
 
-def route_as_coords(G: nx.MultiDiGraph, route_nodes: List[int]) -> List[Tuple[float, float]]:
+def route_as_coords(G: nx.DiGraph, route_nodes: List[str]) -> List[Tuple[float, float]]:
     """Convierte nodos del grafo a lista [(lat, lon), ...] para Leaflet."""
-    return [(G.nodes[n]["y"], G.nodes[n]["x"]) for n in route_nodes]
+    coords: List[Tuple[float, float]] = []
+    for n in route_nodes:
+        data = G.nodes[n]
+        # En el grafo CSV usamos lat/lon
+        coords.append((float(data["lat"]), float(data["lon"])))
+    return coords
 
+def get_subgraph(G, node_start, node_end, radius_dist=0.035):
+    try:
+        n1 = G.nodes[node_start]
+        n2 = G.nodes[node_end]
+        
+        min_lat = min(n1['lat'], n2['lat']) - radius_dist
+        max_lat = max(n1['lat'], n2['lat']) + radius_dist
+        min_lon = min(n1['lon'], n2['lon']) - radius_dist
+        max_lon = max(n1['lon'], n2['lon']) + radius_dist
+        
+        selected_nodes = [
+            n for n, d in G.nodes(data=True) 
+            if min_lat <= d['lat'] <= max_lat and min_lon <= d['lon'] <= max_lon
+        ]
+        
+        # Validación de seguridad: si cortamos de más, devolvemos todo
+        if node_start not in selected_nodes or node_end not in selected_nodes:
+            return G
+            
+        return G.subgraph(selected_nodes)
+    except Exception:
+        return G
 
 # -----------------------------
 # LÓGICA POR ALGORITMO
 # -----------------------------
 def compute_route_for_severity(
-    orig_node: int,
+    orig_node: str,
     orig_lat: float,
     orig_lon: float,
     severity: str,
-    algorithm: str
+    algorithm: str,
 ) -> Dict[str, Any]:
     """
     Calcula una ruta para una severidad y un algoritmo dados.
     Retorna un diccionario con los datos de la ruta o con 'error'.
     """
-    target = find_nearest_place(orig_lat, orig_lon, severity, "San Miguel, Lima, Peru")
+    target = find_nearest_place(orig_lat, orig_lon, severity)
     if not target:
         return {"error": f"No se encontraron establecimientos para la gravedad '{severity}'."}
 
     dest_lat, dest_lon, dest_name, dest_type = target
-    dest_node = ox.distance.nearest_nodes(graph, dest_lon, dest_lat)
+    dest_node = nearest_graph_node(dest_lat, dest_lon)
 
     algo = (algorithm or "dijkstra").lower()
     blocked_segment_points = None
     blocked_segment_name = None
 
     try:
-        # 1️⃣ DIJKSTRA – Ruta más corta real
+        # DIJKSTRA – Ruta más corta real
         if algo == "dijkstra":
-            route_nodes = nx.shortest_path(graph, orig_node, dest_node, weight="length")
-            total_m = nx.shortest_path_length(graph, orig_node, dest_node, weight="length")
+            route_nodes = nx.shortest_path(graph, orig_node, dest_node, weight="weight")
+            total_m = nx.shortest_path_length(graph, orig_node, dest_node, weight="weight")
 
-        # 2️⃣ BELLMAN–FORD – Penaliza calles lentas
+        # BELLMAN–FORD – Penaliza calles lentas (según tipo_via)
         elif algo == "bellman_ford":
-            penalized = graph.copy()
-            for u, v, k, data in penalized.edges(keys=True, data=True):
-                L = data.get("length", 0.0)
-                highway = data.get("highway", "")
-                if isinstance(highway, list):
-                    highway = highway[0]
+            sub_G = get_subgraph(graph_bellman, orig_node, dest_node)
+            
+            route_nodes = nx.bellman_ford_path(sub_G, orig_node, dest_node, weight="weight")
+            total_m = nx.bellman_ford_path_length(sub_G, orig_node, dest_node, weight="weight")
 
-                # Penaliza calles internas / residenciales
-                if highway in ["residential", "service", "living_street"]:
-                    data["length"] = L * 2.5
-                # Favorece vías principales
-                elif highway in ["primary", "secondary"]:
-                    data["length"] = L * 0.8
-
-            route_nodes = nx.bellman_ford_path(penalized, orig_node, dest_node, weight="length")
-            total_m = nx.bellman_ford_path_length(penalized, orig_node, dest_node, weight="length")
-
-        # 3️⃣ UNION–FIND – Bloqueo inteligente basado en la ruta
+        # UNION–FIND – Bloqueo inteligente basado en la ruta
         elif algo == "union_find":
-            # a) Ruta base con Dijkstra en el grafo normal
-            base_route = nx.shortest_path(graph, orig_node, dest_node, weight="length")
+            base_route = nx.shortest_path(graph, orig_node, dest_node, weight="weight")
 
-            blocked_graph = graph.copy()
+            sub_G = get_subgraph(graph, orig_node, dest_node)
+            blocked_graph = sub_G.copy() 
+
             if len(base_route) >= 2:
-                # Elegimos un tramo "interno" de la ruta (no el primero ni el último, cuando sea posible)
+                # Elegimos un tramo "interno"
                 if len(base_route) > 3:
                     idx = len(base_route) // 2
                     u = base_route[idx - 1]
@@ -171,30 +239,27 @@ def compute_route_for_severity(
                     u = base_route[0]
                     v = base_route[1]
 
-                edge_data = blocked_graph.get_edge_data(u, v, default=None)
-                if edge_data:
-                    # Tomamos el primer sub-arco entre u y v
-                    first_key = next(iter(edge_data))
-                    data = edge_data[first_key]
-                    blocked_segment_name = data.get("name", "Tramo crítico bloqueado")
+                # Verificar si existen en el subgrafo recortado (por seguridad)
+                if blocked_graph.has_edge(u, v):
+                    data = blocked_graph.get_edge_data(u, v)
+                    if isinstance(data, dict) and 0 in data:
+                        edge_attr = data[0]
+                    else:
+                        edge_attr = data
 
+                    blocked_segment_name = edge_attr.get("name", "Tramo crítico bloqueado")
                     blocked_segment_points = [
-                        (blocked_graph.nodes[u]["y"], blocked_graph.nodes[u]["x"]),
-                        (blocked_graph.nodes[v]["y"], blocked_graph.nodes[v]["x"]),
+                        (float(blocked_graph.nodes[u]["lat"]), float(blocked_graph.nodes[u]["lon"])),
+                        (float(blocked_graph.nodes[v]["lat"]), float(blocked_graph.nodes[v]["lon"])),
                     ]
+                    blocked_graph.remove_edge(u, v)
 
-                    # Removemos todos los arcos entre u y v (bloqueo de ese tramo)
-                    for key in list(edge_data.keys()):
-                        if blocked_graph.has_edge(u, v, key):
-                            blocked_graph.remove_edge(u, v, key=key)
-
-            # Union–Find sobre el grafo bloqueado
+            # Union–Find sobre el grafo PEQUEÑO (Rapidísimo)
             uf = nx.utils.UnionFind(blocked_graph.nodes)
-            for a, b, _ in blocked_graph.edges(keys=True):
+            for a, b in blocked_graph.edges():
                 uf.union(a, b)
 
             if uf[orig_node] != uf[dest_node]:
-                # No hay conexión posible con el tramo bloqueado
                 return {
                     "error": "Ruta bloqueada: el tramo crítico está cerrado (bloqueo simulado).",
                     "blocked_segment_points": blocked_segment_points,
@@ -203,14 +268,13 @@ def compute_route_for_severity(
                     "algorithm_used": algo,
                 }
 
-            # Si aún hay conexión, buscamos la ruta alternativa
-            route_nodes = nx.shortest_path(blocked_graph, orig_node, dest_node, weight="length")
-            total_m = nx.shortest_path_length(blocked_graph, orig_node, dest_node, weight="length")
+            route_nodes = nx.shortest_path(blocked_graph, orig_node, dest_node, weight="weight")
+            total_m = nx.shortest_path_length(blocked_graph, orig_node, dest_node, weight="weight")
 
         else:
             # Por defecto, Dijkstra
-            route_nodes = nx.shortest_path(graph, orig_node, dest_node, weight="length")
-            total_m = nx.shortest_path_length(graph, orig_node, dest_node, weight="length")
+            route_nodes = nx.shortest_path(graph, orig_node, dest_node, weight="weight")
+            total_m = nx.shortest_path_length(graph, orig_node, dest_node, weight="weight")
 
         distance_km = round(total_m / 1000, 2)
         avg_speed_kmh = 35
@@ -253,7 +317,8 @@ def compute_route_for_severity(
 @app.post("/route")
 async def get_route(req: RouteRequest):
     try:
-        orig_node = ox.distance.nearest_nodes(graph, req.longitude, req.latitude)
+        # Nota: latitude = Y, longitude = X
+        orig_node = nearest_graph_node(req.latitude, req.longitude)
         algo = (req.algorithm or "dijkstra").lower()
         severity = (req.severity or "").lower()
 
