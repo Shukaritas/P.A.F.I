@@ -10,19 +10,12 @@ import pandas as pd
 
 from app.utils.graph_loader import load_graph
 
-# -----------------------------
-# MODELO DE ENTRADA
-# -----------------------------
 class RouteRequest(BaseModel):
     latitude: float
     longitude: float
-    severity: str              # "leve" | "moderada" | "grave" | "todos"
-    algorithm: str = "dijkstra"  # "dijkstra" | "bellman_ford" | "union_find"
+    severity: str              
+    algorithm: str = "dijkstra" 
 
-
-# -----------------------------
-# FASTAPI + STATIC
-# -----------------------------
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -30,17 +23,10 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 async def index():
     return FileResponse("static/index.html")
 
-
-# -----------------------------
-# CARGA DEL GRAFO (LIMA + CALLAO)
-# -----------------------------
 print("Cargando grafo de Lima y Callao desde CSV...")
 
-# G: grafo vial dirigido (Lima + Callao)
-# hospitals_df: catálogo de centros de salud (con columnas X, Y, NOMBRE, Tipo, etc.)
 graph, hospitals_df = load_graph(base_path="app/data")
 
-# Cargamos también el listado de nodos viales para búsquedas rápidas de vecinos
 nodes_df = pd.read_csv("app/data/nodos_lima_callao.csv", dtype={"node_id": str})
 NODE_IDS = nodes_df["node_id"].values
 NODE_LATS = nodes_df["lat"].values
@@ -48,7 +34,6 @@ NODE_LONS = nodes_df["lon"].values
 
 print(f"Grafo listo: {len(graph.nodes)} nodos, {len(graph.edges)} aristas.")
 
-# Preprocesamos los tipos de centros de salud para cada severidad
 ALL_TYPES = sorted(set(hospitals_df["Tipo"].astype(str)))
 
 
@@ -56,7 +41,7 @@ def build_severity_types() -> Dict[str, List[str]]:
     grave = []
     moderada_extra = []
     for t in ALL_TYPES:
-        tu = t.upper().replace("Í", "I")  # CLÍNICA -> CLINICA
+        tu = t.upper().replace("Í", "I")
         if "HOSPITAL" in tu:
             grave.append(t)
         if "CLINIC" in tu or "EMERGENCIA" in tu or "URGENCIA" in tu or "POLICLIN" in tu:
@@ -64,7 +49,7 @@ def build_severity_types() -> Dict[str, List[str]]:
 
     grave = sorted(set(grave))
     moderada = sorted(set(grave + moderada_extra))
-    leve = sorted(set(ALL_TYPES))  # para leve permitimos cualquier centro
+    leve = sorted(set(ALL_TYPES))
 
     return {
         "grave": grave,
@@ -80,10 +65,6 @@ def severity_to_types(severity: str) -> List[str]:
     s = (severity or "").lower()
     return SEVERITY_TYPES.get(s, SEVERITY_TYPES["leve"])
 
-
-# -----------------------------
-# HELPERS
-# -----------------------------
 def nearest_graph_node(lat: float, lon: float) -> str:
     """
     Devuelve el id del nodo vial más cercano (en todo Lima + Callao),
@@ -91,7 +72,6 @@ def nearest_graph_node(lat: float, lon: float) -> str:
     """
     dlat = NODE_LATS - lat
     dlon = NODE_LONS - lon
-    # Distancia aproximada en grados (suficiente para escoger el más cercano)
     d2 = dlat * dlat + dlon * dlon
     idx = int(np.argmin(d2))
     return str(NODE_IDS[idx])
@@ -122,7 +102,6 @@ def find_nearest_place(
         try:
             d = geodesic((lat, lon), (plat, plon)).km
         except Exception:
-            # Si geodesic falla por algún motivo raro, usamos distancia euclidiana
             d = ((lat - plat) ** 2 + (lon - plon) ** 2) ** 0.5
 
         if d < min_dist:
@@ -145,14 +124,9 @@ def route_as_coords(G: nx.DiGraph, route_nodes: List[str]) -> List[Tuple[float, 
     coords: List[Tuple[float, float]] = []
     for n in route_nodes:
         data = G.nodes[n]
-        # En el grafo CSV usamos lat/lon
         coords.append((float(data["lat"]), float(data["lon"])))
     return coords
 
-
-# -----------------------------
-# LÓGICA POR ALGORITMO
-# -----------------------------
 def compute_route_for_severity(
     orig_node: str,
     orig_lat: float,
@@ -176,36 +150,29 @@ def compute_route_for_severity(
     blocked_segment_name = None
 
     try:
-        # 1️⃣ DIJKSTRA – Ruta más corta real
         if algo == "dijkstra":
             route_nodes = nx.shortest_path(graph, orig_node, dest_node, weight="weight")
             total_m = nx.shortest_path_length(graph, orig_node, dest_node, weight="weight")
 
-        # 2️⃣ BELLMAN–FORD – Penaliza calles lentas (según tipo_via)
         elif algo == "bellman_ford":
             penalized = graph.copy()
             for u, v, data in penalized.edges(data=True):
                 L = float(data.get("weight", 0.0))
                 tipo_via = str(data.get("tipo_via", "")).lower()
 
-                # Penaliza calles internas / residenciales
                 if tipo_via in ["residential", "service", "living_street"]:
                     data["weight"] = L * 2.5
-                # Favorece vías principales
                 elif tipo_via in ["primary", "secondary", "trunk", "motorway"]:
                     data["weight"] = L * 0.8
 
             route_nodes = nx.bellman_ford_path(penalized, orig_node, dest_node, weight="weight")
             total_m = nx.bellman_ford_path_length(penalized, orig_node, dest_node, weight="weight")
 
-        # 3️⃣ UNION–FIND – Bloqueo inteligente basado en la ruta
         elif algo == "union_find":
-            # a) Ruta base con Dijkstra en el grafo normal
             base_route = nx.shortest_path(graph, orig_node, dest_node, weight="weight")
 
             blocked_graph = graph.copy()
             if len(base_route) >= 2:
-                # Elegimos un tramo "interno" de la ruta (no el primero ni el último, cuando sea posible)
                 if len(base_route) > 3:
                     idx = len(base_route) // 2
                     u = base_route[idx - 1]
@@ -215,9 +182,7 @@ def compute_route_for_severity(
                     v = base_route[1]
 
                 if blocked_graph.has_edge(u, v):
-                    # Tomamos los datos de la arista
                     data = blocked_graph.get_edge_data(u, v)
-                    # Si hay varias aristas paralelas, elegimos una (MultiDiGraph)
                     if isinstance(data, dict) and 0 in data:
                         edge_attr = data[0]
                     else:
@@ -230,16 +195,13 @@ def compute_route_for_severity(
                         (float(blocked_graph.nodes[v]["lat"]), float(blocked_graph.nodes[v]["lon"])),
                     ]
 
-                    # Eliminamos la arista (o todas las paralelas si existieran)
                     blocked_graph.remove_edge(u, v)
 
-            # Union–Find sobre el grafo bloqueado
             uf = nx.utils.UnionFind(blocked_graph.nodes)
             for a, b in blocked_graph.edges():
                 uf.union(a, b)
 
             if uf[orig_node] != uf[dest_node]:
-                # No hay conexión posible con el tramo bloqueado
                 return {
                     "error": "Ruta bloqueada: el tramo crítico está cerrado (bloqueo simulado).",
                     "blocked_segment_points": blocked_segment_points,
@@ -248,12 +210,10 @@ def compute_route_for_severity(
                     "algorithm_used": algo,
                 }
 
-            # Si aún hay conexión, buscamos la ruta alternativa
             route_nodes = nx.shortest_path(blocked_graph, orig_node, dest_node, weight="weight")
             total_m = nx.shortest_path_length(blocked_graph, orig_node, dest_node, weight="weight")
 
         else:
-            # Por defecto, Dijkstra
             route_nodes = nx.shortest_path(graph, orig_node, dest_node, weight="weight")
             total_m = nx.shortest_path_length(graph, orig_node, dest_node, weight="weight")
 
@@ -292,18 +252,13 @@ def compute_route_for_severity(
         }
 
 
-# -----------------------------
-# ENDPOINT PRINCIPAL
-# -----------------------------
 @app.post("/route")
 async def get_route(req: RouteRequest):
     try:
-        # Nota: latitude = Y, longitude = X
         orig_node = nearest_graph_node(req.latitude, req.longitude)
         algo = (req.algorithm or "dijkstra").lower()
         severity = (req.severity or "").lower()
 
-        # MODO "TODOS": leve, moderada y grave en una sola llamada
         if severity == "todos":
             severities = ["leve", "moderada", "grave"]
             routes = []
@@ -321,10 +276,8 @@ async def get_route(req: RouteRequest):
                 "routes": routes,
             }
 
-        # MODO NORMAL: una sola severidad
         result = compute_route_for_severity(orig_node, req.latitude, req.longitude, severity, algo)
         if "error" in result and not result.get("route_points"):
-            # Error "duro", devolvemos mensaje + posible info de bloqueo
             return {
                 "error": result["error"],
                 "blocked_segment_points": result.get("blocked_segment_points"),
